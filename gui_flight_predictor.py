@@ -1,33 +1,92 @@
 # gui_flight_predictor.py
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.decomposition import PCA
-from sklearn.cluster import MiniBatchKMeans
-import joblib  # for saving/loading models
+import joblib
 import os
 
 # ------------------------------------------------------------
-# Load the trained model and scaler
+# Load models
 # ------------------------------------------------------------
-# Make sure flight_clustering_from_scratch.py saves these after training:
-# - kmeans model -> kmeans_model.joblib
-# - scaler -> scaler.joblib
-# - label encoders -> encoder_OriginCity.joblib, etc.
-MODEL_DIR = os.path.join(os.path.dirname(__file__), 'ClusteringAlgorithm')
+BASE_DIR = os.path.dirname(__file__)
 
-kmeans_model = joblib.load(os.path.join(MODEL_DIR, "kmeans_model.joblib"))
-scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
+# --- Clustering models ---
+CLUSTER_DIR = os.path.join(BASE_DIR, "ClusteringAlgorithm")
+
+kmeans_model = joblib.load(os.path.join(CLUSTER_DIR, "kmeans_model.joblib"))
+scaler = joblib.load(os.path.join(CLUSTER_DIR, "scaler.joblib"))
+pca = joblib.load(os.path.join(CLUSTER_DIR, "pca_model.joblib"))
+cluster_means = joblib.load(os.path.join(CLUSTER_DIR, "cluster_means.joblib"))
+
 encoders = {
-    "OriginCityName": joblib.load(os.path.join(MODEL_DIR, "encoder_OriginCityName.joblib")),
-    "DestCityName": joblib.load(os.path.join(MODEL_DIR, "encoder_DestCityName.joblib")),
-    "Marketing_Airline_Network": joblib.load(os.path.join(MODEL_DIR, "encoder_Marketing_Airline_Network.joblib")),
+    "OriginCityName": joblib.load(os.path.join(CLUSTER_DIR, "encoder_OriginCityName.joblib")),
+    "DestCityName": joblib.load(os.path.join(CLUSTER_DIR, "encoder_DestCityName.joblib")),
+    "Marketing_Airline_Network": joblib.load(os.path.join(CLUSTER_DIR, "encoder_Marketing_Airline_Network.joblib")),
 }
 
-# Optional: load PCA for visualization
-pca = joblib.load(os.path.join(MODEL_DIR, "pca_model.joblib"))
+# --- Logistic classifier ---
+CLASSIFIER_DIR = os.path.join(BASE_DIR, "ClassifierAlgorithm")
+logreg_weights = joblib.load(os.path.join(CLASSIFIER_DIR, "logreg_weights.joblib"))
+
+def sigmoid(z):
+    z = np.clip(z, -40, 40)
+    return 1 / (1 + np.exp(-z))
+
+
+# ------------------------------------------------------------
+# Load full dataset for cluster summaries
+# ------------------------------------------------------------
+df_original = pd.read_parquet(
+    r"C:\Users\solar\OneDrive\Documents\DataMiningProject\Flight_Delay.parquet"
+)
+
+features = [
+    "Year", "DayofMonth", "FlightDate",
+    "OriginCityName", "DestCityName", "Marketing_Airline_Network",
+    "CRSDepTime", "DepTime", "CRSArrTime", "TaxiOut"
+]
+
+df_original = df_original[features].copy()
+
+df_original["FlightDate"] = pd.to_datetime(df_original["FlightDate"], errors="coerce")
+df_original["FlightDate"] = df_original["FlightDate"].dt.dayofyear
+
+# Encode categories
+for col, enc in encoders.items():
+    df_original[col] = enc.transform(df_original[col].astype(str))
+
+df_original = df_original.fillna(df_original.median(numeric_only=True))
+
+# Scale
+X_scaled_full = scaler.transform(df_original)
+
+# Assign clusters
+df_original["Cluster"] = kmeans_model.predict(X_scaled_full)
+
+# ------------------------------------------------------------
+# Build cluster summary table
+# ------------------------------------------------------------
+def top_values(series, n=3):
+    return series.value_counts().head(n).index.tolist()
+
+cluster_summary_df = df_original.groupby("Cluster").agg({
+    "DepTime": ["mean", "std"],
+    "CRSDepTime": ["mean", "std"],
+    "TaxiOut": ["mean", "std"],
+    "OriginCityName": lambda x: top_values(x),
+    "DestCityName": lambda x: top_values(x),
+    "Marketing_Airline_Network": lambda x: top_values(x)
+})
+
+cluster_summary_df.columns = [
+    "DepTime_mean", "DepTime_std",
+    "CRSDepTime_mean", "CRSDepTime_std",
+    "TaxiOut_mean", "TaxiOut_std",
+    "Top_Origins", "Top_Destinations", "Top_Airlines"
+]
+
 
 # ------------------------------------------------------------
 # GUI
@@ -35,88 +94,106 @@ pca = joblib.load(os.path.join(MODEL_DIR, "pca_model.joblib"))
 class FlightPredictorGUI:
     def __init__(self, master):
         self.master = master
-        master.title("Flight Delay & Cluster Predictor")
-        master.geometry("500x600")
-        
+        master.title("Flight Delay, Cluster & Logistic Predictor")
+        master.geometry("700x900")
+
         self.inputs = {}
-        features = [
-            "Year", "DayofMonth", "FlightDate", 
-            "OriginCityName", "DestCityName", "Marketing_Airline_Network",
-            "CRSDepTime", "DepTime", "CRSArrTime", "TaxiOut"
-        ]
-        
-        for i, f in enumerate(features):
-            label = ttk.Label(master, text=f)
-            label.grid(row=i, column=0, sticky='w', padx=10, pady=5)
-            entry = ttk.Entry(master)
-            entry.grid(row=i, column=1, padx=10, pady=5)
-            self.inputs[f] = entry
-            
-        self.predict_btn = ttk.Button(master, text="Predict Delay & Cluster", command=self.predict)
-        self.predict_btn.grid(row=len(features), column=0, columnspan=2, pady=20)
-        
-        self.output_text = tk.Text(master, height=10, width=60)
-        self.output_text.grid(row=len(features)+1, column=0, columnspan=2, padx=10, pady=10)
-        
+        self.features = features
+
+        # Example prefill
+        prefill = {
+            "Year": "2020",
+            "DayofMonth": "14",
+            "FlightDate": "2020-07-14",
+            "OriginCityName": "Dallas/Fort Worth, TX",
+            "DestCityName": "Atlanta, GA",
+            "Marketing_Airline_Network": "AA",
+            "CRSDepTime": "1145",
+            "DepTime": "1153",
+            "CRSArrTime": "1425",
+            "TaxiOut": "0"
+        }
+
+        for i, f in enumerate(self.features):
+            ttk.Label(master, text=f).grid(row=i, column=0, sticky="w", padx=10, pady=5)
+            e = ttk.Entry(master)
+            e.grid(row=i, column=1, padx=10, pady=5)
+            e.insert(0, prefill.get(f, ""))
+            self.inputs[f] = e
+
+        ttk.Button(master, text="Predict", command=self.predict).grid(
+            row=len(self.features), column=0, columnspan=2, pady=20
+        )
+
+        self.output_text = tk.Text(master, height=35, width=80)
+        self.output_text.grid(row=len(self.features)+1, column=0, columnspan=2)
+
+    # ------------------------------------------------------------
+    # Prediction Logic
+    # ------------------------------------------------------------
     def predict(self):
         try:
-            # ------------------------------------------------------------
-            # 1. Read user input
-            # ------------------------------------------------------------
-            data = {}
-            for f, entry in self.inputs.items():
-                value = entry.get()
-                if value == "":
-                    data[f] = np.nan
-                else:
-                    data[f] = value
-            
-            # ------------------------------------------------------------
-            # 2. Preprocess
-            # ------------------------------------------------------------
-            df_input = pd.DataFrame([data])
-            
-            # FlightDate -> day of year
-            df_input['FlightDate'] = pd.to_datetime(df_input['FlightDate'], errors='coerce')
-            df_input['FlightDate'] = df_input['FlightDate'].dt.dayofyear
-            
+            # Read inputs
+            row = {}
+            for f, e in self.inputs.items():
+                v = e.get()
+                row[f] = np.nan if v == "" else v
+
+            df = pd.DataFrame([row])
+
+            # Fix date
+            df["FlightDate"] = pd.to_datetime(df["FlightDate"], errors="coerce")
+            df["FlightDate"] = df["FlightDate"].dt.dayofyear
+
             # Encode categorical
             for col, enc in encoders.items():
-                df_input[col] = enc.transform(df_input[col].astype(str))
-            
-            # Fill NaN with median (or zero)
-            df_input = df_input.fillna(0)
-            
+                df[col] = enc.transform(df[col].astype(str))
+
+            df = df.fillna(df.median(numeric_only=True))
+
             # Scale
-            X_scaled = scaler.transform(df_input)
-            
-            # ------------------------------------------------------------
-            # 3. Predict cluster
-            # ------------------------------------------------------------
-            cluster_label = kmeans_model.predict(X_scaled)[0]
-            
-            # ------------------------------------------------------------
-            # 4. Approximate delay
-            # (use the mean delay of that cluster if available)
-            # ------------------------------------------------------------
-            # This requires cluster means saved from your clustering script
-            cluster_means = joblib.load(os.path.join(MODEL_DIR, "cluster_means.joblib"))
-            predicted_delay = cluster_means.get(cluster_label, "Unknown")
-            
-            # ------------------------------------------------------------
-            # 5. Display results
-            # ------------------------------------------------------------
+            X_scaled = scaler.transform(df)
+
+            # ------------------ KMEANS ------------------
+            cluster = kmeans_model.predict(X_scaled)[0]
+            est_delay = cluster_means.get(cluster, "Unknown")
+
+            summary = cluster_summary_df.loc[cluster]
+
+            top_origins = encoders["OriginCityName"].inverse_transform(summary["Top_Origins"])
+            top_dests = encoders["DestCityName"].inverse_transform(summary["Top_Destinations"])
+            top_air = encoders["Marketing_Airline_Network"].inverse_transform(summary["Top_Airlines"])
+
+            # ------------------ LOGISTIC ------------------
+            Xb = np.hstack([X_scaled, np.ones((1, 1))])   # add bias
+            prob = sigmoid(Xb @ logreg_weights)[0]
+            binary = "YES" if prob >= 0.5 else "NO"
+
+            # ------------------ Output ------------------
             self.output_text.delete("1.0", tk.END)
-            self.output_text.insert(tk.END, f"Predicted Cluster: {cluster_label}\n")
-            self.output_text.insert(tk.END, f"Estimated Departure Delay (minutes): {predicted_delay}\n")
-            self.output_text.insert(tk.END, f"Similar Clusters: {[cluster_label]}\n")
-            
+
+            self.output_text.insert(tk.END, "=== KMEANS CLUSTERING ===\n")
+            self.output_text.insert(tk.END, f"Cluster: {cluster}\n")
+            self.output_text.insert(tk.END, f"Estimated Delay: {est_delay} minutes\n\n")
+
+            self.output_text.insert(tk.END, "Cluster Characteristics:\n")
+            self.output_text.insert(tk.END, f" Avg DepTime: {summary['DepTime_mean']:.1f} ± {summary['DepTime_std']:.1f}\n")
+            self.output_text.insert(tk.END, f" Avg CRSDepTime: {summary['CRSDepTime_mean']:.1f} ± {summary['CRSDepTime_std']:.1f}\n")
+            self.output_text.insert(tk.END, f" Avg TaxiOut: {summary['TaxiOut_mean']:.1f} ± {summary['TaxiOut_std']:.1f}\n")
+            self.output_text.insert(tk.END, f" Top Origins: {list(top_origins)}\n")
+            self.output_text.insert(tk.END, f" Top Destinations: {list(top_dests)}\n")
+            self.output_text.insert(tk.END, f" Top Airlines: {list(top_air)}\n\n")
+
+            self.output_text.insert(tk.END, "=== LOGISTIC DELAY CLASSIFIER ===\n")
+            self.output_text.insert(tk.END, f"Probability of delay ≥ 15 minutes: {prob:.3f}\n")
+            self.output_text.insert(tk.END, f"Delay? {binary}\n")
+
         except Exception as e:
             messagebox.showerror("Error", str(e))
-        
+
 
 # ------------------------------------------------------------
-# Run GUI
+# Run
 # ------------------------------------------------------------
 if __name__ == "__main__":
     root = tk.Tk()
