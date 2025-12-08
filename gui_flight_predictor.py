@@ -30,6 +30,13 @@ encoders = {
 CLASSIFIER_DIR = os.path.join(BASE_DIR, "ClassifierAlgorithm")
 logreg_weights = joblib.load(os.path.join(CLASSIFIER_DIR, "logreg_weights.joblib"))
 
+# --- Regression model (manual gradient descent) ---
+REG_DIR = os.path.join(BASE_DIR, "RegressionAlgorithm")
+
+reg_theta = joblib.load(os.path.join(REG_DIR, "reg_theta.joblib"))
+reg_mean = joblib.load(os.path.join(REG_DIR, "reg_mean.joblib"))
+reg_std = joblib.load(os.path.join(REG_DIR, "reg_std.joblib"))
+
 def sigmoid(z):
     z = np.clip(z, -40, 40)
     return 1 / (1 + np.exp(-z))
@@ -169,6 +176,21 @@ class FlightPredictorGUI:
             prob = sigmoid(Xb @ logreg_weights)[0]
             binary = "YES" if prob >= 0.5 else "NO"
 
+            # ------------------ REGRESSION (Manual Gradient Descent Model) ------------------
+            # Extract required regression inputs
+            reg_features = ["Year","DayofMonth","FlightDate","OriginCityName","DestCityName","Marketing_Airline_Network","CRSDepTime","DepTime","CRSArrTime","TaxiOut"]
+            X_reg = df[reg_features].values.astype(float)
+
+            # Manual standardization
+            X_reg_scaled = (X_reg - reg_mean) / reg_std
+
+            # Add bias term
+            X_reg_bias = np.c_[np.ones((X_reg_scaled.shape[0], 1)), X_reg_scaled]
+
+            # Predict delay
+            reg_prediction = float(X_reg_bias.dot(reg_theta)[0])
+
+
             # ------------------ Output ------------------
             self.output_text.delete("1.0", tk.END)
 
@@ -187,6 +209,10 @@ class FlightPredictorGUI:
             self.output_text.insert(tk.END, "=== LOGISTIC DELAY CLASSIFIER ===\n")
             self.output_text.insert(tk.END, f"Probability of delay ≥ 15 minutes: {prob:.3f}\n")
             self.output_text.insert(tk.END, f"Delay? {binary}\n")
+
+            self.output_text.insert(tk.END, "\n=== REGRESSION: DELAY IN MINUTES ===\n")
+            self.output_text.insert(tk.END, f"Predicted Arrival Delay: {reg_prediction:.2f} minutes\n")
+
 
         except Exception as e:
             messagebox.showerror("Error", str(e))
