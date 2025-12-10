@@ -1,130 +1,85 @@
-import pandas as pd
-import numpy as np
-import joblib
 import os
+import numpy as np
+import pandas as pd
+import joblib
 
-# ============================================================
-#                 CONFIGURATION (DO NOT CHANGE)
-# ============================================================
+#paths
+BASE = os.path.dirname(os.path.dirname(__file__))
+DATA = os.path.join(BASE, "Flight_Delay.parquet")
+CLUST = os.path.join(BASE, "ClusteringAlgorithm")
 
-# SAME ORDER AS THE GUI
-features = [
-    "Year",
-    "DayofMonth",
-    "FlightDate",
-    "OriginCityName",
-    "DestCityName",
-    "Marketing_Airline_Network",
-    "CRSDepTime",
-    "DepTime",
-    "CRSArrTime",
-    "TaxiOut"
+#cols
+FEAT = [
+    "Year","DayofMonth","FlightDate",
+    "Marketing_Airline_Network","OriginCityName","DestCityName",
+    "CRSDepTime","DepTime","CRSArrTime","TaxiOut"
 ]
+TGT = "ArrDelayMinutes"
 
-target = "ArrDelayMinutes"
+#load preprocessing
+scaler = joblib.load(os.path.join(CLUST,"scaler.joblib"))
+enc_M = joblib.load(os.path.join(CLUST,"encoder_Marketing_Airline_Network.joblib"))
+enc_O = joblib.load(os.path.join(CLUST,"encoder_OriginCityName.joblib"))
+enc_D = joblib.load(os.path.join(CLUST,"encoder_DestCityName.joblib"))
 
-# Paths (same structure as your GUI)
-BASE_DIR = os.path.dirname(__file__)
-CLUSTER_DIR = os.path.join(BASE_DIR, "..", "ClusteringAlgorithm")
+#load data
+df = pd.read_parquet(DATA)
+df = df[FEAT+[TGT]].dropna()
 
-# Load all encoders used in GUI
-enc_origin = joblib.load(os.path.join(CLUSTER_DIR, "encoder_OriginCityName.joblib"))
-enc_dest = joblib.load(os.path.join(CLUSTER_DIR, "encoder_DestCityName.joblib"))
-enc_air = joblib.load(os.path.join(CLUSTER_DIR, "encoder_Marketing_Airline_Network.joblib"))
-
-# ============================================================
-#                 LOAD DATASET
-# ============================================================
-
-df = pd.read_parquet(
-    r"C:\Users\solar\OneDrive\Documents\DataMiningProject\Flight_Delay.parquet"
-)
-
-df = df[features + [target]].dropna()
-
-# Convert FlightDate → Day of year
+#date
 df["FlightDate"] = pd.to_datetime(df["FlightDate"], errors="coerce")
-df["FlightDate"] = df["FlightDate"].dt.dayofyear
+df["FlightDate"] = df["FlightDate"].dt.dayofyear.fillna(0)
 
-# ============================================================
-#        APPLY EXACT SAME ENCODING AS USED IN THE GUI
-# ============================================================
+#encode
+df["Marketing_Airline_Network"] = enc_M.transform(df["Marketing_Airline_Network"].astype(str))
+df["OriginCityName"] = enc_O.transform(df["OriginCityName"].astype(str))
+df["DestCityName"] = enc_D.transform(df["DestCityName"].astype(str))
 
-df["OriginCityName"] = enc_origin.transform(df["OriginCityName"].astype(str))
-df["DestCityName"] = enc_dest.transform(df["DestCityName"].astype(str))
-df["Marketing_Airline_Network"] = enc_air.transform(df["Marketing_Airline_Network"].astype(str))
+#prep
+X = df[FEAT].values.astype(float)
+y = df[TGT].values.astype(float).reshape(-1,1)
 
-# ============================================================
-#      SPLIT NUMERICAL VS CATEGORICAL FOR PROPER SCALING
-# ============================================================
+#scale X
+X_scaled = scaler.transform(X)
+Xb = np.hstack([np.ones((X_scaled.shape[0],1)), X_scaled])
 
-# Only these are numeric and safe to standardize
-numeric_cols = ["Year", "DayofMonth", "FlightDate",
-                "CRSDepTime", "DepTime", "CRSArrTime", "TaxiOut"]
-
-categorical_cols = ["OriginCityName", "DestCityName", "Marketing_Airline_Network"]
-
-# Extract matrices
-X_num = df[numeric_cols].values
-X_cat = df[categorical_cols].values.astype(float)
-y = df[target].values.reshape(-1, 1)
-
-# Standardize ONLY numeric features
-X_mean = X_num.mean(axis=0)
-X_std = X_num.std(axis=0)
-X_num_scaled = (X_num - X_mean) / X_std
-
-# Concatenate back in correct order matching GUI
-X_scaled = np.concatenate([X_num_scaled, X_cat], axis=1)
-
-# Add bias
-X_bias = np.c_[np.ones((X_scaled.shape[0], 1)), X_scaled]
-
-# ============================================================
-#             TRAIN–TEST SPLIT + GRADIENT DESCENT
-# ============================================================
-
+#train-test
 np.random.seed(42)
-indices = np.arange(len(X_bias))
-np.random.shuffle(indices)
+idx = np.arange(len(Xb))
+np.random.shuffle(idx)
+cut = int(0.8*len(idx))
+tr, te = idx[:cut], idx[cut:]
+Xtr, Xte = Xb[tr], Xb[te]
+ytr, yte = y[tr], y[te]
 
-split = int(0.8 * len(indices))
+#scale y
+y_mean = ytr.mean()
+y_std = ytr.std()
+ytr_s = (ytr - y_mean)/y_std
 
-train_idx = indices[:split]
-test_idx = indices[split:]
-
-X_train, X_test = X_bias[train_idx], X_bias[test_idx]
-y_train, y_test = y[train_idx], y[test_idx]
-
-theta = np.zeros((X_train.shape[1], 1))
-
-alpha = 0.01      # Learning rate
-epochs = 1000     # Iterations
+#train
+theta = np.zeros(Xtr.shape[1])
+alpha = 0.0001
+epochs = 800
 
 for i in range(epochs):
-    predictions = X_train.dot(theta)
-    errors = predictions - y_train
-    gradients = (2 / len(X_train)) * X_train.T.dot(errors)
-    theta -= alpha * gradients
+    preds = Xtr @ theta
+    errs = preds.reshape(-1,1) - ytr_s
+    grad = (2/len(Xtr)) * (Xtr.T @ errs).ravel()
+    theta -= alpha * grad
 
-# ============================================================
-#                   SAVE TRAINED PARAMETERS
-# ============================================================
+    if i % 100 == 0:
+        mse = np.mean(errs**2)
+        print("Epoch", i, "MSE =", mse)
 
-save_path = os.path.dirname(__file__)
+#predict
+y_pred_s = (Xte @ theta).reshape(-1,1)
+y_pred = y_pred_s * y_std + y_mean
 
-joblib.dump(theta, os.path.join(save_path, "reg_theta.joblib"))
-joblib.dump(X_mean, os.path.join(save_path, "reg_mean.joblib"))
-joblib.dump(X_std, os.path.join(save_path, "reg_std.joblib"))
+mse_test = np.mean((y_pred - yte)**2)
+print("Test MSE:", mse_test)
 
-# Also store numeric & categorical column ordering
-joblib.dump(numeric_cols, os.path.join(save_path, "reg_numeric_cols.joblib"))
-joblib.dump(categorical_cols, os.path.join(save_path, "reg_categorical_cols.joblib"))
-
-print("\nSaved regression model successfully!")
-print("Files created:")
-print(" - reg_theta.joblib")
-print(" - reg_mean.joblib")
-print(" - reg_std.joblib")
-print(" - reg_numeric_cols.joblib")
-print(" - reg_categorical_cols.joblib")
+#save
+OUT = os.path.join(os.path.dirname(__file__),"regression_theta.joblib")
+meta = {"theta":theta, "y_mean":y_mean, "y_std":y_std}
+joblib.dump(meta, OUT)
